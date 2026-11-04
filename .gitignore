@@ -1,0 +1,13 @@
+# Virtuelle Python-Umgebung
+.venv/
+
+# Python Cache
+__pycache__/
+*.pyc
+
+# Rohdaten nicht hochladen
+data/*.csv
+
+# Temporäre Dateien
+*.log
+.DS_Store
