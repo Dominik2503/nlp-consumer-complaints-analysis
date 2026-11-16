@@ -1,2 +1,2 @@
-Gesamtdatensätze,Fehlende Texte,Doppelte Texte,Eindeutige Texte nach Bereinigung,Analysierte Texte,Anzahl Themen
-162421,10,37939,124472,20000,5
+﻿Gesamtdatensätze,Fehlende Texte,Doppelte Texte,Eindeutige Texte nach Bereinigung,Analysierte Texte,Optimale LDA Topic-Anzahl,Optimale NMF Topic-Anzahl,LDA C_v,NMF C_v
+162421,10,37939,124472,20000,7,5,0.5331397827007139,0.6136606860606669

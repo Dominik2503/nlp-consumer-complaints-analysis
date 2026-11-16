@@ -1,4 +1,3 @@
-
 from pathlib import Path
 import re
 import warnings
@@ -9,6 +8,8 @@ import nltk
 import spacy
 
 from nltk.corpus import stopwords
+from gensim.corpora import Dictionary
+from gensim.models import CoherenceModel
 from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
 from sklearn.decomposition import LatentDirichletAllocation, NMF
 
@@ -22,7 +23,8 @@ ROOT = Path(__file__).resolve().parents[1]
 DATA_PATH = ROOT / "data" / "complaints_processed.csv"
 RESULTS = ROOT / "results"
 
-N_TOPICS = 5
+TOPIC_RANGE = range(3, 11)
+COHERENCE_TOP_WORDS = 10
 SAMPLE_SIZE = 20000
 MAX_FEATURES = 5000
 RANDOM_STATE = 42
@@ -123,6 +125,18 @@ sample = df.sample(
 )
 
 texts = sample["clean_text"].tolist()
+# Texte für Gensim tokenisieren
+tokenized_documents = [
+    text.split() for text in texts
+]
+
+# Gensim-Wörterbuch erstellen
+dictionary = Dictionary(tokenized_documents)
+
+dictionary.filter_extremes(
+    no_below=3,
+    no_above=0.95
+)
 
 print("Texte für die Analyse:", len(texts))
 
@@ -137,7 +151,7 @@ count_vectorizer = CountVectorizer(
     max_features=MAX_FEATURES,
     min_df=3,
     max_df=0.95,
-    ngram_range=(1, 2)
+    ngram_range=(1, 1)
 )
 
 bow_matrix = count_vectorizer.fit_transform(texts)
@@ -155,7 +169,7 @@ tfidf_vectorizer = TfidfVectorizer(
     max_features=MAX_FEATURES,
     min_df=3,
     max_df=0.95,
-    ngram_range=(1, 2),
+    ngram_range=(1, 1),
     sublinear_tf=True
 )
 
@@ -165,13 +179,153 @@ print("TF-IDF Matrix:", tfidf_matrix.shape)
 
 
 # --------------------------------------------------
-# 7. Topic Modeling: LDA
+# 7. Hilfsfunktionen für Topic Modeling
 # --------------------------------------------------
 
-print("\n6. Trainiere LDA ...")
+def extract_topic_words(model, feature_names, number_of_words=12):
+
+    topics = []
+
+    for weights in model.components_:
+        top_indices = weights.argsort()[-number_of_words:][::-1]
+
+        words = [
+            feature_names[i]
+            for i in top_indices
+        ]
+
+        topics.append(words)
+
+    return topics
+
+
+def calculate_coherence(topics):
+
+    valid_topics = []
+
+    for topic in topics:
+        words = [
+            word for word in topic
+            if word in dictionary.token2id
+        ]
+
+        if len(words) >= 2:
+            valid_topics.append(words)
+
+    if not valid_topics:
+        return 0.0
+
+    coherence_model = CoherenceModel(
+        topics=valid_topics,
+        texts=tokenized_documents,
+        dictionary=dictionary,
+        coherence="c_v",
+        processes=1
+    )
+
+    return coherence_model.get_coherence()
+
+
+# --------------------------------------------------
+# 8. Optimale Topic-Anzahl ermitteln
+# --------------------------------------------------
+
+print("\n6. Teste verschiedene Topic-Anzahlen ...")
+
+lda_features = count_vectorizer.get_feature_names_out()
+nmf_features = tfidf_vectorizer.get_feature_names_out()
+
+evaluation_results = []
+
+for n_topics in TOPIC_RANGE:
+
+    print(f"\nTeste {n_topics} Topics ...")
+
+    # LDA trainieren
+    lda_test = LatentDirichletAllocation(
+        n_components=n_topics,
+        random_state=RANDOM_STATE,
+        max_iter=10,
+        learning_method="batch",
+        n_jobs=-1
+    )
+
+    lda_test.fit(bow_matrix)
+
+    lda_words = extract_topic_words(
+        lda_test,
+        lda_features,
+        COHERENCE_TOP_WORDS
+    )
+
+    lda_score = calculate_coherence(lda_words)
+
+    # NMF trainieren
+    nmf_test = NMF(
+        n_components=n_topics,
+        random_state=RANDOM_STATE,
+        init="nndsvda",
+        max_iter=400
+    )
+
+    nmf_test.fit(tfidf_matrix)
+
+    nmf_words = extract_topic_words(
+        nmf_test,
+        nmf_features,
+        COHERENCE_TOP_WORDS
+    )
+
+    nmf_score = calculate_coherence(nmf_words)
+
+    evaluation_results.append({
+        "Anzahl Topics": n_topics,
+        "LDA C_v": lda_score,
+        "NMF C_v": nmf_score
+    })
+
+    print(f"LDA C_v: {lda_score:.4f}")
+    print(f"NMF C_v: {nmf_score:.4f}")
+
+
+# Kohärenzwerte speichern
+evaluation_df = pd.DataFrame(evaluation_results)
+
+evaluation_df.to_csv(
+    RESULTS / "coherence_comparison.csv",
+    index=False,
+    encoding="utf-8-sig"
+)
+
+
+# --------------------------------------------------
+# 9. Beste Topic-Anzahl auswählen
+# --------------------------------------------------
+
+best_lda_row = evaluation_df.loc[
+    evaluation_df["LDA C_v"].idxmax()
+]
+
+best_nmf_row = evaluation_df.loc[
+    evaluation_df["NMF C_v"].idxmax()
+]
+
+best_lda_topics = int(best_lda_row["Anzahl Topics"])
+best_nmf_topics = int(best_nmf_row["Anzahl Topics"])
+
+print("\nOptimale Topic-Anzahlen:")
+print("LDA:", best_lda_topics)
+print("NMF:", best_nmf_topics)
+
+
+# --------------------------------------------------
+# 10. Finale Modelle trainieren
+# --------------------------------------------------
+
+print("\n7. Trainiere finale Modelle ...")
 
 lda = LatentDirichletAllocation(
-    n_components=N_TOPICS,
+    n_components=best_lda_topics,
     random_state=RANDOM_STATE,
     max_iter=10,
     learning_method="batch",
@@ -180,15 +334,8 @@ lda = LatentDirichletAllocation(
 
 lda.fit(bow_matrix)
 
-
-# --------------------------------------------------
-# 8. Topic Modeling: NMF
-# --------------------------------------------------
-
-print("\n7. Trainiere NMF ...")
-
 nmf = NMF(
-    n_components=N_TOPICS,
+    n_components=best_nmf_topics,
     random_state=RANDOM_STATE,
     init="nndsvda",
     max_iter=400
@@ -198,76 +345,72 @@ nmf.fit(tfidf_matrix)
 
 
 # --------------------------------------------------
-# 9. Wichtigste Begriffe extrahieren
+# 11. Finale Topics und Verteilungen erstellen
 # --------------------------------------------------
 
-def extract_topics(model, feature_names):
+lda_topic_words = extract_topic_words(
+    lda,
+    lda_features,
+    12
+)
 
-    topics = []
+nmf_topic_words = extract_topic_words(
+    nmf,
+    nmf_features,
+    12
+)
 
-    for index, weights in enumerate(model.components_):
 
-        top_indices = weights.argsort()[-12:][::-1]
+def create_topic_table(model, topic_words, matrix):
 
-        words = [
-            feature_names[i]
-            for i in top_indices
-        ]
+    assignments = model.transform(matrix).argmax(axis=1)
 
-        topics.append({
-            "Thema": f"Topic {index + 1}",
-            "Schlüsselbegriffe": ", ".join(words)
+    topic_counts = [
+        int((assignments == i).sum())
+        for i in range(model.n_components)
+    ]
+
+    results = []
+
+    for i, words in enumerate(topic_words):
+        results.append({
+            "Thema": f"Topic {i + 1}",
+            "Schlüsselbegriffe": ", ".join(words),
+            "Anzahl Beschwerden": topic_counts[i]
         })
 
-    return pd.DataFrame(topics)
+    return pd.DataFrame(results)
 
 
-lda_topics = extract_topics(
+lda_topics = create_topic_table(
     lda,
-    count_vectorizer.get_feature_names_out()
+    lda_topic_words,
+    bow_matrix
 )
 
-nmf_topics = extract_topics(
+nmf_topics = create_topic_table(
     nmf,
-    tfidf_vectorizer.get_feature_names_out()
+    nmf_topic_words,
+    tfidf_matrix
 )
 
 
 # --------------------------------------------------
-# 10. Dokumente Themen zuordnen
-# --------------------------------------------------
-
-lda_assignments = lda.transform(bow_matrix).argmax(axis=1)
-nmf_assignments = nmf.transform(tfidf_matrix).argmax(axis=1)
-
-lda_counts = [
-    (lda_assignments == i).sum()
-    for i in range(N_TOPICS)
-]
-
-nmf_counts = [
-    (nmf_assignments == i).sum()
-    for i in range(N_TOPICS)
-]
-
-lda_topics["Anzahl Beschwerden"] = lda_counts
-nmf_topics["Anzahl Beschwerden"] = nmf_counts
-
-
-# --------------------------------------------------
-# 11. Ergebnisse speichern
+# 12. Ergebnisse speichern
 # --------------------------------------------------
 
 print("\n8. Speichere Ergebnisse ...")
 
 lda_topics.to_csv(
     RESULTS / "lda_topics.csv",
-    index=False
+    index=False,
+    encoding="utf-8-sig"
 )
 
 nmf_topics.to_csv(
     RESULTS / "nmf_topics.csv",
-    index=False
+    index=False,
+    encoding="utf-8-sig"
 )
 
 summary = pd.DataFrame([{
@@ -275,18 +418,58 @@ summary = pd.DataFrame([{
     "Fehlende Texte": missing,
     "Doppelte Texte": duplicates,
     "Eindeutige Texte nach Bereinigung": len(df),
-    "Analysierte Texte": sample_size,
-    "Anzahl Themen": N_TOPICS
+    "Analysierte Texte": len(texts),
+    "Optimale LDA Topic-Anzahl": best_lda_topics,
+    "Optimale NMF Topic-Anzahl": best_nmf_topics,
+    "LDA C_v": float(best_lda_row["LDA C_v"]),
+    "NMF C_v": float(best_nmf_row["NMF C_v"])
 }])
 
 summary.to_csv(
     RESULTS / "dataset_summary.csv",
-    index=False
+    index=False,
+    encoding="utf-8-sig"
 )
 
 
 # --------------------------------------------------
-# 12. Visualisierung
+# 13. Kohärenz visualisieren
+# --------------------------------------------------
+
+plt.figure(figsize=(9, 5))
+
+plt.plot(
+    evaluation_df["Anzahl Topics"],
+    evaluation_df["LDA C_v"],
+    marker="o",
+    label="LDA"
+)
+
+plt.plot(
+    evaluation_df["Anzahl Topics"],
+    evaluation_df["NMF C_v"],
+    marker="o",
+    label="NMF"
+)
+
+plt.xlabel("Anzahl Topics")
+plt.ylabel("C_v-Kohärenz")
+plt.title("Vergleich der Topic-Kohärenz")
+plt.xticks(list(TOPIC_RANGE))
+plt.legend()
+plt.grid(alpha=0.3)
+plt.tight_layout()
+
+plt.savefig(
+    RESULTS / "coherence_comparison.png",
+    dpi=300
+)
+
+plt.close()
+
+
+# --------------------------------------------------
+# 14. Topic-Verteilungen visualisieren
 # --------------------------------------------------
 
 def create_chart(data, title, filename):
@@ -306,7 +489,7 @@ def create_chart(data, title, filename):
 
     plt.savefig(
         RESULTS / filename,
-        dpi=160
+        dpi=300
     )
 
     plt.close()
@@ -326,7 +509,7 @@ create_chart(
 
 
 # --------------------------------------------------
-# 13. Ergebnisse anzeigen
+# 15. Ergebnisse anzeigen
 # --------------------------------------------------
 
 print("\n===================================")
@@ -339,5 +522,9 @@ print(lda_topics.to_string(index=False))
 print("\nNMF – Ergebnisse:")
 print(nmf_topics.to_string(index=False))
 
+print("\nKohärenzvergleich:")
+print(evaluation_df.to_string(index=False))
+
 print("\nAlle Ergebnisse gespeichert unter:")
 print(RESULTS)
+
